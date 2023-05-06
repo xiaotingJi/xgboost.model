@@ -1,0 +1,326 @@
+import numpy as np
+import pandas as pd
+import sys
+
+train_view=pd.read_csv('/data/train_view.csv',encoding='gbk')
+train_trx=pd.read_csv('/data/train_trx.csv')
+train_base=pd.read_csv('/data/train_base.csv')
+
+testa_view=pd.read_csv('/data/testa_view.csv',encoding='gbk')
+testa_trx=pd.read_csv('/data/testa_trx.csv')
+testa_base=pd.read_csv('/data/testa_base.csv')
+
+print(train_view)
+print(train_trx)
+print(train_base)
+
+
+result_view = pd.concat([testa_view, train_view], axis=0)
+result_trx = pd.concat([testa_trx, train_trx], axis=0)
+result_base = pd.concat([testa_base, train_base], axis=0)
+
+from datetime import date, timedelta,datetime#直接对时间戳中的年份进行替换，再将一个 Pandas 的 Series 类型转换为 datetime 类型，并且只保留日期部分。赋值给原数列
+time_series1 = pd.Series(result_trx['trx_tm'])
+time_series1 = time_series1.str.replace('1492', '1990')
+datetime_series1 = pd.to_datetime(time_series1).dt.date
+print(datetime_series1 )
+result_trx['trx_tm']=datetime_series1
+
+time_series2 = pd.Series(result_view['acs_tm'])
+time_series2=time_series2.str.replace('1492-','1990-')
+time_series2=time_series2.str.replace('上午','')
+time_series2=time_series2.str.replace('下午','')
+time_series2=time_series2.str.slice(stop=10)
+        
+datetime_series2 = pd.to_datetime(time_series2).dt.date
+result_view['acs_tm']=datetime_series2 
+
+#对base表处理，去掉城市信息，性别为0/1
+result_base=result_base.iloc[:, [0, 4, 1, 2, 3]]
+result_base=result_base.sort_values(by = 'cust_wid')
+print(result_base)
+
+# 转换列dtype从object到int或float数据
+result_base.iloc[:, 1:2] =result_base.iloc[:, 1:2].apply(pd.to_numeric, errors='coerce')
+result_base['gdr_cd'][result_base['gdr_cd']== 'M'] = 1
+result_base['gdr_cd'][result_base['gdr_cd']== 'F'] = 2
+result_base.drop(columns=['cty_cd'], inplace=True)
+result_base['age'].fillna(0, inplace=True)
+result_base['label'].fillna(0, inplace=True)
+result_base['gdr_cd'].fillna(0, inplace=True)
+#train_base['label'] = np.where(train_base['label'] > 0, 1, 0)
+
+#对trx表进行处理，整理交易金额（总额、均值、标准差、最大、最小）
+result_trx_left = pd.pivot_table(result_trx,
+                          index=['cust_wid'],
+                          values=['trx_amt'],
+                          aggfunc={'trx_amt': [np.sum, np.mean, np.std,np.min, np.max]})
+# 计算交易次数和最后一次交易距第一次交易的时间跨度
+result_trx_mid = pd.pivot_table(result_trx,
+                         index=['cust_wid'],
+                         values=['trx_tm'],
+                         aggfunc={'trx_tm': ['count', lambda x: x.max() - x.min()]})
+
+# 重命名列使其更易读
+result_trx_mid.rename(columns={'count': 'Total_tra',
+                        '<lambda_0>': 'time_span'}, inplace=True)
+# 计算交易频繁度（平均一次交易间隔多少天）
+result_trx_mid['tra_fre', 'averagen1'] = result_trx_mid['trx_tm', 'time_span']/result_trx_mid['trx_tm', 'Total_tra']
+# datetime 数据类型转为 float型，用于后续的样本训练，因为训练模型无法直接训练日期型数据
+result_trx_mid['trx_tm', 'time_span'] = result_trx_mid['trx_tm', 'time_span']/timedelta(days=1)
+result_trx_mid['tra_fre', 'averagen1'] = result_trx_mid['tra_fre', 'averagen1']/timedelta(days=1)
+# 计算每个用户各种支付方式等的次数
+result_trx_right = result_trx[['cust_wid','trx_cd']]
+result_trx_right = result_trx_right.melt('cust_wid')
+result_trx_right = pd.pivot_table(result_trx_right,
+                           index=['cust_wid'],
+                           columns=['variable', 'value'],
+                           aggfunc="size",
+                           fill_value=0)
+#train_trx_pivot
+result_trx_pivot = pd.merge(result_trx_left, result_trx_mid, how='left', on='cust_wid')
+result_trx_pivot = pd.merge(result_trx_pivot, result_trx_right, how='left', on='cust_wid')
+
+
+#Processing view table
+result_view_left = result_view[['cust_wid', 'page_id']]
+result_view_left = result_view_left.melt('cust_wid')
+result_view_left = pd.pivot_table(result_view_left,
+                         index=['cust_wid'],
+                         columns=['variable', 'value'],
+                         aggfunc='size',
+                         fill_value=0)
+########################
+max_col=result_view_left.sum(axis=0).sort_values(ascending=False).index[0:50]
+result_view_left_max=result_view_left.loc[:,max_col]
+result_view_left_var=result_view_left.loc[:,result_view_left.var().sort_values(ascending=False).index[0:50]]
+result_view_left=pd.merge(result_view_left_max,result_view_left_var, how='left', on='cust_wid')
+result_view_left=result_view_left.loc[:,~result_view_left.columns.duplicated()]
+print(result_view_left)
+###################################
+from datetime import timedelta
+result_view_right =result_view[['cust_wid', 'acs_tm']]
+result_view_right = pd.pivot_table(result_view_right,
+                           index=['cust_wid'],
+                           values=['acs_tm'],
+                           aggfunc={'acs_tm': ['count', lambda x: x.max()-x.min()]})
+result_view_right.rename(columns={'<lambda_0>': 'time_span',
+                          'count': 'Total_views'}, inplace=True)
+result_view_right['view_fre', 'averagen'] = result_view_right['acs_tm', 'time_span']/result_view_right['acs_tm', 'Total_views']
+result_view_right['acs_tm', 'time_span'] = result_view_right['acs_tm', 'time_span']/timedelta(days=1)
+result_view_right['view_fre', 'averagen'] = result_view_right['view_fre', 'averagen']/timedelta(days=1)
+#train_view_pivot
+result_view_pivot= pd.merge(result_view_left, result_view_right, on='cust_wid', how='outer').fillna(0)
+print(result_view_pivot)
+
+
+
+#######################################
+result_total = pd.merge(result_base, result_trx_pivot, how='left', on='cust_wid')
+result_total = pd.merge(result_total, result_view_pivot, how='left', on='cust_wid')
+# 将df1中无交易行为或APP行为的用户数据填充为零
+result_total.fillna(0, inplace=True)
+##########################################
+new_dfX= result_total.iloc[50000:,2:]
+new_dfy = result_total.iloc[50000:, :2]
+new_dfy.drop(columns='cust_wid', inplace=True)
+new_dfy['label'] = np.where(new_dfy['label'] > 0, 1, 0)
+print(new_dfy)
+
+
+#########################################################
+import re
+regex = re.compile(r"[(),]", re.IGNORECASE)
+new_dfX.columns = [regex.sub("_", str(col)).replace("_", "") for col in new_dfX.columns.values]
+
+from imblearn.over_sampling import RandomOverSampler
+ros =RandomOverSampler(random_state=0)
+new_dfX_resample, new_dfy_resample = ros.fit_resample(new_dfX, new_dfy)
+
+print(new_dfX_resample.shape[0])
+print(new_dfy_resample.shape[0])
+print(new_dfy_resample.value_counts())
+#############################################
+from sklearn.model_selection import train_test_split
+new_dfX_subsample, _, new_dfy_subsample, _ = train_test_split(new_dfX_resample, new_dfy_resample, test_size=0.5, random_state=0)
+
+print(new_dfX_subsample.shape[0])
+print(new_dfy_subsample.shape[0])
+print(new_dfy_subsample.value_counts())
+##################################################
+from sklearn.model_selection import *
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import PowerTransformer
+from sklearn.preprocessing import StandardScaler
+x_train, x_test, y_train, y_test = train_test_split(new_dfX_subsample, new_dfy_subsample, test_size=0.2)
+# 分层k折交叉拆分器 - 用于网格搜索
+cv = StratifiedKFold(n_splits=3,shuffle=True)
+
+##############################################
+# 分类模型性能查看函数
+def performance_clf(model, X, y, name=None):
+    y_predict = model.predict(X)
+    if name:
+        print(name, ':')
+    print(f'accuracy score is: {accuracy_score(y,y_predict)}')
+    print(f'precision score is: {precision_score(y,y_predict)}')
+    print(f'recall score is: {recall_score(y,y_predict)}')
+    print(f'auc: {roc_auc_score(y,y_predict)}')
+    print('- - - - - - ')
+
+    
+import xgboost as xgb
+from sklearn.model_selection import GridSearchCV
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import PowerTransformer
+# xgboost 模型
+xgb_clf = xgb.XGBClassifier(objective='binary:logistic',
+                            n_jobs=-1,
+                            booster='gbtree',
+                            n_estimators=1000,
+                            learning_rate=0.01)
+# 参数设定
+xgb_params = {'max_depth':[6],
+              'subsample': [0.6],
+              'colsample_bytree': [0.5],
+              'reg_alpha': [0.1]}
+
+# 参数搜索
+xgb_gridsearch = GridSearchCV(xgb_clf, xgb_params, cv=cv, n_jobs=-1,
+                              scoring='roc_auc', verbose=10, refit=True)
+
+# 工作流管道
+pipe_xgb = Pipeline([
+    ('sc', StandardScaler()),   # 标准化Z-score
+    ('pow_trans', PowerTransformer()),  # 纠偏
+    ('xgb_grid', xgb_gridsearch)
+])
+
+# 搜索参数并训练模型
+pipe_xgb.fit(x_train, y_train)
+print(pipe_xgb.named_steps['xgb_grid'].best_params_)
+
+
+#################################
+new_dfX_test = result_total.iloc[:50000,2:]
+
+import re
+regex = re.compile(r"[(),]", re.IGNORECASE)
+new_dfX_test.columns = [regex.sub("_", str(col)).replace("_", "") for col in new_dfX_test.columns.values]
+print(new_dfX_test)
+
+#####################################
+
+
+##############################################
+from xgboost import XGBClassifier
+
+y_pred = pipe_xgb.predict(new_dfX_test)
+print(y_pred)
+##########################################
+new_dfy_test = result_total.iloc[:50000, :2]
+print(new_dfy_test)
+new_dfy_test['label'] = y_pred
+print(new_dfy_test)
+new_dfy_test['label'] = new_dfy_test['label'].astype(int)
+###############################################
+result_total1 = result_total.iloc[50000:, :]
+result_total1.drop(columns='cust_wid', inplace=True)
+print(result_total1)
+new_result = result_total1[result_total1['label'] != 0]
+print(new_result)
+###########################
+new_dfX1 = new_result.iloc[:,1:]
+new_dfy1 = new_result.iloc[:, :1]
+print(new_dfy1)
+import re
+regex = re.compile(r"[(),]", re.IGNORECASE)
+new_dfX1.columns = [regex.sub("_", str(col)).replace("_", "") for col in new_dfX1.columns.values]
+print(new_dfX1)
+print(new_dfy1)
+new_dfy1['label'] = new_dfy1['label'].apply(lambda x: x - 1)
+print(new_dfy1)
+################################3
+from imblearn.over_sampling import RandomOverSampler
+ros =RandomOverSampler(random_state=0)
+new_dfX1_resample, new_dfy1_resample = ros.fit_resample(new_dfX1, new_dfy1)
+new_dfy1_resample = new_dfy1_resample.astype(int)
+
+print(new_dfX1_resample.shape[0])
+print(new_dfy1_resample.shape[0])
+print(new_dfy1_resample.value_counts())
+
+from sklearn.model_selection import train_test_split
+new_dfX1_subsample, _, new_dfy1_subsample, _ = train_test_split(new_dfX1_resample, new_dfy1_resample, test_size=0.5, random_state=0)
+
+print(new_dfX1_subsample.shape[0])
+print(new_dfy1_subsample.shape[0])
+print(new_dfy1_subsample.value_counts())
+###################################
+x1_train, x1_test, y1_train, y1_test = train_test_split(new_dfX1_resample, new_dfy1_resample, test_size=0.5)
+# 分层k折交叉拆分器 - 用于网格搜索
+cv1 = StratifiedKFold(n_splits=3,shuffle=True)
+print(y1_test.value_counts())
+######################################
+import xgboost as xgb
+from sklearn.model_selection import GridSearchCV
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import PowerTransformer
+###############################################33
+# xgboost 模型
+xgb1_clf = xgb.XGBClassifier(objective='multi:softmax',
+                            num_class=14,
+                            n_jobs=-1,
+                            booster='gbtree',
+                            n_estimators=1000,
+                            learning_rate=0.01)
+
+# 参数设定
+xgb1_params = {'max_depth':[6, 9],
+              'subsample': [0.6, 0.9],
+              'colsample_bytree': [0.5, 0.6],
+              'reg_alpha': [0.05, 0.1]}
+
+# 参数搜索
+xgb1_gridsearch = GridSearchCV(xgb1_clf, xgb1_params, cv=cv1, n_jobs=-1,
+                              scoring='roc_auc', verbose=10, refit=True)
+
+# 工作流管道
+pipe_xgb1 = Pipeline([
+    ('sc', StandardScaler()),   # 标准化Z-score
+    ('pow_trans', PowerTransformer()),  # 纠偏
+    ('xgb_grid', xgb_gridsearch)
+])
+
+pipe_xgb1.fit(x1_train, y1_train)
+print(pipe_xgb1.named_steps['xgb_grid'].best_params_)
+#############################################
+new_df_combined = pd.concat([new_dfy_test, new_dfX_test], axis=1)
+new_df_combined
+
+new_df_combined1 = new_df_combined[new_df_combined['label'] != 0]
+new_df_combined1
+new_dfX_test1=new_df_combined1.iloc[:,2:]
+new_dfX_test1
+
+new_dfy_test1 = new_dfy_test[new_dfy_test['label'] != 0]
+new_dfy_test1
+new_dfy_test1['label'] = y_pred1
+new_dfy_test1['label'] = new_dfy_test1['label'].apply(lambda x: x + 1)
+new_dfy_test1
+new_dfy_test2 = new_dfy_test[new_dfy_test['label'] == 0]
+new_dfy_test2
+# 将两个表合并，按照 cust_wid 的值从小到大排序
+merged_df = pd.concat([new_dfy_test2, new_dfy_test1]).sort_values(by='cust_wid')
+
+# 重置索引
+merged_df = merged_df.reset_index(drop=True)
+merged_df 
+
+# 将结果输出为csv文件
+merged_df.to_csv('/work/output.csv', index=False)
+
+df=pd.read_csv('/work/output.csv')
+df
